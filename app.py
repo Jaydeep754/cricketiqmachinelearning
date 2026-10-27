@@ -181,6 +181,34 @@ def top_n_by(xi, gs, key, n=3, hi=True):
     return [p for p, _ in sorted(scored, key=lambda x: x[1], reverse=hi)[:n]]
 
 
+def venue_toss_metrics(venue_matches: pd.DataFrame) -> dict[str, float]:
+    """Return historical toss and toss-decision win rates for a venue."""
+    completed = venue_matches.dropna(subset=["winner", "toss_winner", "toss_decision"])
+    if completed.empty:
+        return {
+            "toss_win_rate": 0.5,
+            "field_win_rate": 0.5,
+            "bat_win_rate": 0.5,
+            "field_matches": 0,
+            "bat_matches": 0,
+        }
+
+    toss_wins = (completed["winner"] == completed["toss_winner"]).mean()
+    field = completed[completed["toss_decision"] == "field"]
+    bat = completed[completed["toss_decision"] == "bat"]
+    return {
+        "toss_win_rate": float(toss_wins),
+        "field_win_rate": float(
+            (field["winner"] == field["toss_winner"]).mean()
+        ) if not field.empty else 0.5,
+        "bat_win_rate": float(
+            (bat["winner"] == bat["toss_winner"]).mean()
+        ) if not bat.empty else 0.5,
+        "field_matches": len(field),
+        "bat_matches": len(bat),
+    }
+
+
 def select_bvb_bowlers(xi: list[str], gs: dict, n: int = 5) -> list[str]:
     """
     Selects legitimate frontline bowlers and primary bowling all-rounders from the Playing XI.
@@ -493,6 +521,7 @@ if go:
     v_death = vst.get("venue_avg_death_score",45.0)
     v_chase = vst.get("venue_chase_win_rate",  0.5)
     v_n     = vst.get("venue_matches",          0)
+    toss_metrics = venue_toss_metrics(vm)
 
     # ── Squad stats for analysis ───────────────────────────────────────────────
     effective_ps = {**global_stats, **current_ps}
@@ -537,6 +566,16 @@ if go:
         toss_venue_edge = toss_magnitude if decision_optimal else -toss_magnitude
     else:
         toss_venue_edge = -toss_magnitude if decision_optimal else toss_magnitude
+    chosen_decision_rate = (
+        toss_metrics["field_win_rate"] if toss_decision == "field"
+        else toss_metrics["bat_win_rate"]
+    )
+    toss_team_sign = 1.0 if t1_won_toss else -1.0
+    toss_signal = toss_team_sign * (
+        0.04 * (toss_metrics["toss_win_rate"] - 0.5)
+        + 0.04 * (chosen_decision_rate - 0.5)
+    )
+    toss_signal = float(np.clip(toss_signal, -0.035, 0.035))
 
     # ── Calculate Decision Factors ────────────────────────────────────────────
     factors_t1 = []
@@ -607,13 +646,17 @@ if go:
 
     # Fuse symmetric model prediction with domain evidence differential
     base_logit = float(np.log(np.clip(raw_t1p, 0.05, 0.95) / np.clip(1.0 - raw_t1p, 0.05, 0.95)))
-    fused_logit = base_logit + 0.65 * adv_diff + 1.2 * bvb_delta
+    factor_signal = float(np.clip(0.65 * adv_diff, -0.65, 0.65))
+    bvb_signal = float(np.clip(1.2 * bvb_delta, -0.084, 0.084))
+    fused_logit = base_logit + factor_signal + bvb_signal + toss_signal
     t1p = float(np.clip(1.0 / (1.0 + np.exp(-fused_logit)), 0.08, 0.92))
     t2p = 1.0 - t1p
 
     winner   = team1_name if t1p >= t2p else team2_name
     win_prob = max(t1p, t2p)
     conf_lbl = "High" if win_prob > .65 else ("Moderate" if win_prob > .55 else "Low")
+    toss_signal_t1_pct = (1.0 / (1.0 + np.exp(-toss_signal)) - 0.5) * 100
+    bvb_signal_t1_pct = (1.0 / (1.0 + np.exp(-bvb_signal)) - 0.5) * 100
 
     # ── WINNER BANNER ─────────────────────────────────────────────────────────
     st.markdown(f"""
@@ -641,6 +684,15 @@ if go:
             st.progress(float(prob))
 
     st.divider()
+    st.markdown(
+        f"**Prediction evidence:** Model baseline **{raw_t1p:.1%}** for "
+        f"{team1_name} · verified factors **{factor_signal:+.2f} logit** · "
+        f"BvB **{bvb_signal_t1_pct:+.1f} percentage points** · "
+        f"toss **{toss_signal_t1_pct:+.1f} percentage points** "
+        f"(venue toss-winner match rate {toss_metrics['toss_win_rate']:.0%}; "
+        f"{toss_decision} decision match rate {chosen_decision_rate:.0%}).",
+        help="The ML model remains primary; domain signals are bounded so no single factor can dominate."
+    )
 
     # ════════════════════════════════════════════════════════════════════════════
     # DETAILED ANALYSIS TABS
@@ -1107,6 +1159,8 @@ if go:
             strengths.append("wicket-taking strike rate")
         if (winner == team1_name and bvb_net1 > bvb_net2 + 8) or (winner == team2_name and bvb_net2 > bvb_net1 + 8):
             strengths.append("favorable player head-to-head matchups")
+        if (winner == team1_name and toss_signal > 0) or (winner == team2_name and toss_signal < 0):
+            strengths.append("the toss winner's historically stronger decision")
 
         if strengths:
             strength_desc = f"Their {', '.join(strengths[:2])} are decisive differentiators at {venue}."
@@ -1122,9 +1176,15 @@ if go:
         else:
             chase_desc = f"{'Chasing' if v_chase > 0.52 else 'Defending'} has historically succeeded here ({max(v_chase, 1-v_chase):.0%})."
 
+        evidence_desc = (
+            f"The BvB index is {bvb_net1:.1f} for {team1_name} versus "
+            f"{bvb_net2:.1f} for {team2_name}; the toss winner's historical "
+            f"match rate at this venue is {toss_metrics['toss_win_rate']:.0%}."
+        )
         verdict_text = (
             f"<b>{winner}</b> hold the statistical upper hand with <b>{winner_edges} verified advantages</b> "
             f"(vs {loser_edges} for {loser_team}). {strength_desc} {chase_desc} "
+            f"{evidence_desc} "
             f"The model predicts <b>{winner} with {win_prob:.0%} confidence ({conf_lbl})</b>."
         )
         st.markdown(f"""
