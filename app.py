@@ -12,7 +12,8 @@ import streamlit as st
 
 from src.data_loader import load_data, CURRENT_TEAMS
 from src.player_features import (
-    build_player_stats, build_global_player_stats, get_bvb_stats
+    build_player_stats, build_global_player_stats, build_venue_player_stats,
+    get_bvb_stats
 )
 from src.squad_features import (
     compute_xi_features, squad_batting_features, squad_bowling_features
@@ -1013,20 +1014,20 @@ if go:
 
             # Top scorers and wicket-takers at venue — from all XI players
             all_xi = team1_xi + team2_xi
+            venue_player_stats = build_venue_player_stats(matches, deliveries, venue)
             venue_bat = []
             venue_bowl = []
             for p in all_xi:
                 ps = global_stats.get(p, {})
-                # Approximate venue average from current_ps venue stats if available
-                cp = current_ps.get(p, {})
-                vba = cp.get("bat_venue_avg", ps.get("bat_avg", 22.0))
-                vbsr = cp.get("bat_venue_sr", ps.get("bat_sr", 125.0))
-                vbe = cp.get("bowl_venue_econ", ps.get("bowl_econ", 8.5))
-                inns = ps.get("bat_innings", 0)
-                wkts = ps.get("bowl_wickets", 0)
+                venue_stats_for_player = venue_player_stats.get(p, {})
+                vba = venue_stats_for_player.get("bat_venue_avg", 0.0)
+                vbsr = venue_stats_for_player.get("bat_venue_sr", 0.0)
+                vbe = venue_stats_for_player.get("bowl_venue_econ", 0.0)
+                inns = venue_stats_for_player.get("bat_venue_innings", 0)
+                wkts = venue_stats_for_player.get("bowl_venue_wickets", 0)
                 if inns >= 2:
                     venue_bat.append((p, vba, vbsr, inns))
-                if wkts >= 1:
+                if wkts >= 1 and venue_stats_for_player.get("bowl_venue_balls", 0) > 0:
                     venue_bowl.append((p, vbe, wkts))
 
             venue_bat.sort(key=lambda x: x[1], reverse=True)

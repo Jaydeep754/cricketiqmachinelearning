@@ -9,6 +9,19 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 
+NON_BOWLER_DISMISSALS = {
+    "obstructing the field",
+    "retired hurt",
+    "retired out",
+    "run out",
+    "timed out",
+}
+
+
+def _is_bowler_wicket(row: pd.Series) -> bool:
+    """Return whether a dismissal is credited to the bowler."""
+    return bool(row["is_wicket"]) and row["dismissal_kind"] not in NON_BOWLER_DISMISSALS
+
 
 # ─── Shrinkage helpers ────────────────────────────────────────────────────────
 
@@ -214,7 +227,8 @@ def build_player_stats(matches: pd.DataFrame, deliveries: pd.DataFrame) -> dict[
                 if runs == 0 and extra == 0:
                     bwl["dots"] += 1
             bwl["runs"] += total  # total includes extras
-            if is_wkt and row["dismissal_kind"] not in ["run out", "retired hurt", "obstructing the field"]:
+            bowler_wicket = _is_bowler_wicket(row)
+            if bowler_wicket:
                 bwl["wickets"] += 1
             if runs == 4:
                 bwl["fours"] += 1
@@ -223,23 +237,23 @@ def build_player_stats(matches: pd.DataFrame, deliveries: pd.DataFrame) -> dict[
             if phase == "pp":
                 bwl["pp_balls"] += 1
                 bwl["pp_runs"] += total
-                if is_wkt:
+                if bowler_wicket:
                     bwl["pp_wkts"] += 1
             elif phase == "mid":
                 bwl["mid_balls"] += 1
                 bwl["mid_runs"] += total
-                if is_wkt:
+                if bowler_wicket:
                     bwl["mid_wkts"] += 1
             else:
                 bwl["death_balls"] += 1
                 bwl["death_runs"] += total
-                if is_wkt:
+                if bowler_wicket:
                     bwl["death_wkts"] += 1
 
             # Venue bowling
             bowl_venue[(bowler, venue)]["balls"] += 1
             bowl_venue[(bowler, venue)]["runs"] += total
-            if is_wkt:
+            if bowler_wicket:
                 bowl_venue[(bowler, venue)]["wickets"] += 1
 
         # Finalise innings for each batter (record score)
@@ -323,14 +337,15 @@ def build_global_player_stats(matches: pd.DataFrame, deliveries: pd.DataFrame) -
                 bwl["balls"] += 1
                 if runs == 0 and extra == 0: bwl["dots"] += 1
             bwl["runs"] += total
-            if is_wkt and row["dismissal_kind"] not in ["run out", "retired hurt", "obstructing the field"]:
+            bowler_wicket = _is_bowler_wicket(row)
+            if bowler_wicket:
                 bwl["wickets"] += 1
             if phase == "pp":
                 bwl["pp_balls"] += 1; bwl["pp_runs"] += total
-                if is_wkt: bwl["pp_wkts"] += 1
+                if bowler_wicket: bwl["pp_wkts"] += 1
             else:
                 bwl["death_balls"] += 1; bwl["death_runs"] += total
-                if is_wkt: bwl["death_wkts"] += 1
+                if bowler_wicket: bwl["death_wkts"] += 1
 
         # Finalise innings
         for batter, inn in inn_t.items():
@@ -450,6 +465,59 @@ def build_global_player_stats(matches: pd.DataFrame, deliveries: pd.DataFrame) -
             "perf_score":  perf_score,
         }
 
+    return result
+
+
+def build_venue_player_stats(
+    matches: pd.DataFrame,
+    deliveries: pd.DataFrame,
+    venue: str,
+) -> dict[str, dict]:
+    """Build batting and credited bowling stats for one venue."""
+    venue_match_ids = set(matches.loc[matches["venue"] == venue, "id"])
+    venue_deliveries = deliveries[deliveries["match_id"].isin(venue_match_ids)]
+    stats: dict[str, dict] = defaultdict(lambda: {
+        "bat_runs": 0,
+        "bat_balls": 0,
+        "bat_dismissals": 0,
+        "bat_innings": set(),
+        "bowl_runs": 0,
+        "bowl_balls": 0,
+        "bowl_wickets": 0,
+    })
+
+    for _, row in venue_deliveries.iterrows():
+        batter = row["batter"]
+        bowler = row["bowler"]
+        match_id = row["match_id"]
+        runs = int(row["batsman_runs"])
+        total = int(row["total_runs"])
+        is_bowler_wicket = _is_bowler_wicket(row)
+
+        batter_stats = stats[batter]
+        batter_stats["bat_runs"] += runs
+        batter_stats["bat_balls"] += 1
+        batter_stats["bat_innings"].add(match_id)
+        if row["is_wicket"] and row["player_dismissed"] == batter:
+            batter_stats["bat_dismissals"] += 1
+
+        bowler_stats = stats[bowler]
+        bowler_stats["bowl_runs"] += total
+        if row["extras_type"] not in ["wides", "noballs"]:
+            bowler_stats["bowl_balls"] += 1
+        if is_bowler_wicket:
+            bowler_stats["bowl_wickets"] += 1
+
+    result = {}
+    for player, values in stats.items():
+        result[player] = {
+            "bat_venue_avg": values["bat_runs"] / max(values["bat_dismissals"], 1),
+            "bat_venue_sr": values["bat_runs"] / max(values["bat_balls"], 1) * 100,
+            "bat_venue_innings": len(values["bat_innings"]),
+            "bowl_venue_econ": values["bowl_runs"] / max(values["bowl_balls"], 1) * 6,
+            "bowl_venue_wickets": values["bowl_wickets"],
+            "bowl_venue_balls": values["bowl_balls"],
+        }
     return result
 
 
